@@ -1,5 +1,5 @@
 
-export default function pixelmatch(img1, img2, output, width, height, options) {
+export default function pixelmatch(img1, img2, output, width, height, options = {}) {
     const {
         threshold = 0.1,         // matching threshold (0 to 1); smaller is more sensitive
         includeAA = false,       // whether to skip anti-aliasing detection
@@ -49,7 +49,7 @@ export default function pixelmatch(img1, img2, output, width, height, options) {
             const pos = (y * width + x) * 4;
 
             // squared YUV distance between colors at this pixel position, negative if the img2 pixel is darker
-            const delta = colorDelta(img1, img2, pos, pos);
+            const delta = colorDelta(img1, img2, pos, pos, false);
 
             // the color difference is above the threshold
             if (Math.abs(delta) > maxDelta) {
@@ -171,54 +171,42 @@ function hasManySiblings(img, x1, y1, width, height) {
 // using YIQ NTSC transmission color space in mobile applications" by Y. Kotsarenko and F. Ramos
 
 function colorDelta(img1, img2, k, m, yOnly) {
-    let r1 = img1[k + 0];
-    let g1 = img1[k + 1];
-    let b1 = img1[k + 2];
-    let a1 = img1[k + 3];
+    const r1 = img1[k];
+    const g1 = img1[k + 1];
+    const b1 = img1[k + 2];
+    const a1 = img1[k + 3];
+    const r2 = img2[m];
+    const g2 = img2[m + 1];
+    const b2 = img2[m + 2];
+    const a2 = img2[m + 3];
 
-    let r2 = img2[m + 0];
-    let g2 = img2[m + 1];
-    let b2 = img2[m + 2];
-    let a2 = img2[m + 3];
+    let dr = r1 - r2;
+    let dg = g1 - g2;
+    let db = b1 - b2;
+    const da = a1 - a2;
 
-    if (a1 === a2 && r1 === r2 && g1 === g2 && b1 === b2) return 0;
+    if (!da && !dr && !dg && !db) return 0;
 
-    if (a1 < 255) {
-        a1 /= 255;
-        r1 = blend(r1, a1);
-        g1 = blend(g1, a1);
-        b1 = blend(b1, a1);
+    if (a1 < 255 || a2 < 255) { // blend pixels with background
+        const rb = 48 + 159 * (k % 2);
+        const gb = 48 + 159 * ((k / 1.618033988749895 | 0) % 2);
+        const bb = 48 + 159 * ((k / 2.618033988749895 | 0) % 2);
+        dr = (r1 * a1 - r2 * a2 - rb * da) / 255;
+        dg = (g1 * a1 - g2 * a2 - gb * da) / 255;
+        db = (b1 * a1 - b2 * a2 - bb * da) / 255;
     }
 
-    if (a2 < 255) {
-        a2 /= 255;
-        r2 = blend(r2, a2);
-        g2 = blend(g2, a2);
-        b2 = blend(b2, a2);
-    }
-
-    const y1 = rgb2y(r1, g1, b1);
-    const y2 = rgb2y(r2, g2, b2);
-    const y = y1 - y2;
+    const y = dr * 0.29889531 + dg * 0.58662247 + db * 0.11448223;
 
     if (yOnly) return y; // brightness difference only
 
-    const i = rgb2i(r1, g1, b1) - rgb2i(r2, g2, b2);
-    const q = rgb2q(r1, g1, b1) - rgb2q(r2, g2, b2);
+    const i = dr * 0.59597799 - dg * 0.27417610 - db * 0.32180189;
+    const q = dr * 0.21147017 - dg * 0.52261711 + db * 0.31114694;
 
     const delta = 0.5053 * y * y + 0.299 * i * i + 0.1957 * q * q;
 
     // encode whether the pixel lightens or darkens in the sign
-    return y1 > y2 ? -delta : delta;
-}
-
-function rgb2y(r, g, b) { return r * 0.29889531 + g * 0.58662247 + b * 0.11448223; }
-function rgb2i(r, g, b) { return r * 0.59597799 - g * 0.27417610 - b * 0.32180189; }
-function rgb2q(r, g, b) { return r * 0.21147017 - g * 0.52261711 + b * 0.31114694; }
-
-// blend semi-transparent color with white
-function blend(c, a) {
-    return 255 + (c - 255) * a;
+    return y > 0 ? -delta : delta;
 }
 
 function drawPixel(output, pos, r, g, b) {
@@ -232,6 +220,6 @@ function drawGrayPixel(img, i, alpha, output) {
     const r = img[i + 0];
     const g = img[i + 1];
     const b = img[i + 2];
-    const val = blend(rgb2y(r, g, b), alpha * img[i + 3] / 255);
+    const val = 255 + (r * 0.29889531 + g * 0.58662247 + b * 0.11448223 - 255) * alpha * img[i + 3] / 255;
     drawPixel(output, i, val, val, val);
 }
