@@ -3,17 +3,15 @@
 [![Node](https://github.com/mapbox/pixelmatch/actions/workflows/node.yml/badge.svg)](https://github.com/mapbox/pixelmatch/actions/workflows/node.yml)
 [![](https://img.shields.io/badge/simply-awesome-brightgreen.svg)](https://github.com/mourner/projects)
 
-The smallest, simplest and fastest JavaScript pixel-level image comparison library,
+A small, simple and fast JavaScript pixel-level **image comparison library**,
 originally created to compare screenshots in tests.
 
-Features accurate **anti-aliased pixels detection**
-and **perceptual color difference metrics**.
-
+Features accurate **anti-aliased pixels detection** and **perceptual color difference** metrics.
 Inspired by [Resemble.js](https://github.com/Huddle/Resemble.js)
 and [Blink-diff](https://github.com/yahoo/blink-diff).
-Unlike these libraries, pixelmatch is around **150 lines of code**,
+Unlike these libraries, pixelmatch is just **a few hundred lines of code**,
 has **no dependencies**, and works on **raw typed arrays** of image data,
-so it's **blazing fast** and can be used in **any environment** (Node or browsers).
+so it's **very fast** and can be used in both Node and browsers.
 
 ```js
 const numDiffPixels = pixelmatch(img1, img2, diff, 800, 600, {threshold: 0.1});
@@ -21,7 +19,8 @@ const numDiffPixels = pixelmatch(img1, img2, diff, 800, 600, {threshold: 0.1});
 
 Implements ideas from the following papers:
 
-- [Measuring perceived color difference using YIQ NTSC transmission color space in mobile applications](https://www.spiedigitallibrary.org/conference-proceedings-of-spie/8011/80119D/Simple-perceptual-color-space-for-color-specification-and-real-time/10.1117/12.901997.full) (2010, Yuriy Kotsarenko, Fernando Ramos)
+- [A perceptual color space for image processing](https://bottosson.github.io/posts/oklab/) (2020, Björn Ottosson) — the OKLab color space used for color difference.
+- [Distance metrics for very large color differences](https://onlinelibrary.wiley.com/doi/10.1002/col.22451) (2019, Saeideh Abasi et al.) — the OKLab HyAB metric used to compare colors.
 - [Anti-aliased pixel and intensity slope detector](https://www.researchgate.net/publication/234126755_Anti-aliased_Pixel_and_Intensity_Slope_Detector) (2009, Vytautas Vyšniauskas)
 
 ## [Demo](https://observablehq.com/@mourner/pixelmatch-demo)
@@ -51,8 +50,16 @@ Implements ideas from the following papers:
 - `diffColor` — The color of differing pixels in the diff output in `[R, G, B]` format. `[255, 0, 0]` by default.
 - `diffColorAlt` — An alternative color to use for dark on light differences to differentiate between "added" and "removed" parts. If not provided, all differing pixels use the color specified by `diffColor`. `null` by default.
 - `diffMask` — Draw the diff over a transparent background (a mask), rather than over the original image. Will not draw anti-aliased pixels (if detected).
+- `checkerboard` — Blend semi-transparent pixels against a checkerboard pattern when comparing (`true`) rather than plain white (`false`), avoiding false matches between colors that only look alike over one background. `true` by default.
+- `windowSize` — If set to a finite number `N`, return the maximum number of differing pixels in any `N`×`N` sliding window instead of the total count (see below). `Infinity` by default.
 
 Compares two images, writes the output diff and returns the number of mismatched pixels.
+
+### Windowed diff density
+
+By default the return value is the total number of differing pixels. With `windowSize: N`, it instead becomes the largest number of diff pixels found in any `N`×`N` region (`N` is clamped to the image dimensions, and anti-aliased pixels are never counted).
+
+This makes the result robust to scattered noise. Spread-out speckle (GPU dithering, sub-pixel anti-aliasing) never packs densely into a single window, while a genuine regression does. A test can then fail on density — `result / N² > tau` — which stays comparable across image sizes, so you can run a stricter threshold to catch smaller real changes without tripping over noise. The total count is just the degenerate whole-image window, so the return value is always "max diff pixels in any window".
 
 ## Command line
 
