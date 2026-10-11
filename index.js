@@ -3,20 +3,21 @@
  *
  * @param {Uint8Array | Uint8ClampedArray} img1 First image data.
  * @param {Uint8Array | Uint8ClampedArray} img2 Second image data.
- * @param {Uint8Array | Uint8ClampedArray | void} output Image data to write the diff to, if provided.
+ * @param {Uint8Array | Uint8ClampedArray | null | undefined} output Image data to write the diff to, if provided.
  * @param {number} width Input images width.
  * @param {number} height Input images height.
  *
  * @param {Object} [options]
- * @param {number} [options.threshold=0.1] Matching threshold (0 to 1); smaller is more sensitive.
- * @param {boolean} [options.includeAA=false] Whether to skip anti-aliasing detection.
+ * @param {number} [options.threshold=0.1] Matching threshold (0 to 1), the maximum OKLab HyAB distance (1 is black vs white) for pixels to be considered equal; smaller is more sensitive.
+ * @param {boolean} [options.includeAA=false] Whether to count anti-aliased pixels as differences instead of detecting and ignoring them.
  * @param {number} [options.alpha=0.1] Opacity of original image in diff output.
  * @param {[number, number, number]} [options.aaColor=[255, 255, 0]] Color of anti-aliased pixels in diff output.
  * @param {[number, number, number]} [options.diffColor=[255, 0, 0]] Color of different pixels in diff output.
- * @param {[number, number, number]} [options.diffColorAlt=options.diffColor] Whether to detect dark on light differences between img1 and img2 and set an alternative color to differentiate between the two.
+ * @param {[number, number, number]} [options.diffColorAlt=options.diffColor] Color of differing pixels that are darker in img2 than in img1, to distinguish "added" from "removed" parts.
  * @param {boolean} [options.diffMask=false] Draw the diff over a transparent background (a mask).
  * @param {boolean} [options.checkerboard=true] Whether to blend semi-transparent pixels against a checkerboard pattern (true) or plain white (false) when comparing.
  * @param {number} [options.windowSize=Infinity] If finite, return the maximum number of diff pixels found in any N×N sliding window instead of the total diff count.
+ * @param {Uint8Array | Uint8ClampedArray} [options.ignoreMask] One byte per pixel (width × height); pixels with a non-zero value are skipped from comparison.
  *
  * @return {number} The number of mismatched pixels (or the maximum per-window count if windowSize is finite).
  */
@@ -28,36 +29,40 @@ export default function pixelmatch(img1, img2, output, width, height, options = 
         diffColor = [255, 0, 0],
         checkerboard = true,
         windowSize = Infinity,
-        includeAA, diffColorAlt, diffMask
+        includeAA, diffColorAlt, diffMask,
+        ignoreMask
     } = options;
 
-    if (!isPixelData(img1) || !isPixelData(img2) || (output && !isPixelData(output)))
+    if (!isPixelData(img1) || !isPixelData(img2) || (output && !isPixelData(output)) ||
+        (ignoreMask && !isPixelData(ignoreMask)))
         throw new Error('Image data: Uint8Array, Uint8ClampedArray or Buffer expected.');
 
     if (img1.length !== img2.length || (output && output.length !== img1.length))
         throw new Error(`Image sizes do not match. Image 1 size: ${img1.length}, image 2 size: ${img2.length}`);
 
-    if (img1.length !== width * height * 4) throw new Error(`Image data size does not match width/height. Expecting ${width * height * 4}. Got ${img1.length}`);
+    const len = width * height;
+
+    if (img1.length !== len * 4) throw new Error(`Image data size does not match width/height. Expecting ${len * 4}. Got ${img1.length}`);
+
+    if (ignoreMask && ignoreMask.length !== len)
+        throw new Error(`Ignore mask size does not match image width/height. Expecting ${len}. Got ${ignoreMask.length}`);
 
     // check if images are identical
-    const len = width * height;
     const a32 = new Uint32Array(img1.buffer, img1.byteOffset, len);
     const b32 = new Uint32Array(img2.buffer, img2.byteOffset, len);
+
     let identical = true;
 
     for (let i = 0; i < len; i++) {
-        if (a32[i] !== b32[i]) { identical = false; break; }
+        if (a32[i] !== b32[i] && (!ignoreMask || !ignoreMask[i])) { identical = false; break; }
     }
     if (identical) { // fast path if identical
         if (output && !diffMask) {
-            for (let i = 0, pos = 0; i < len; i++, pos += 4) drawGrayPixel(img1, pos, alpha, output);
+            for (let i = 0, pos = 0; i < len; i++, pos += 4) drawGrayPixel(output, pos, img1, alpha);
         }
         return 0;
     }
 
-    // maximum acceptable OKLab HyAB distance between two colors;
-    // 1.0 is the HyAB distance between black and white
-    const maxDelta = threshold;
     const [aaR, aaG, aaB] = aaColor;
     const [diffR, diffG, diffB] = diffColor;
     const [altR, altG, altB] = diffColorAlt || diffColor;
@@ -75,7 +80,7 @@ export default function pixelmatch(img1, img2, output, width, height, options = 
     // compare each pixel of one image against the other one
     for (let i = 0, pos = 0; i < len; i++, pos += 4) {
         // whether the HyAB OKLab distance exceeds the threshold: 0 if not, ±1 if yes (negative if img2 pixel is darker)
-        const delta = a32[i] === b32[i] ? 0 : colorDelta(img1, img2, pos, pos, checkerboard, maxDelta);
+        const delta = (a32[i] === b32[i] || (ignoreMask && ignoreMask[i])) ? 0 : colorDelta(img1, img2, pos, checkerboard, threshold);
 
         // the color difference is above the threshold
         if (delta) {
@@ -108,23 +113,20 @@ export default function pixelmatch(img1, img2, output, width, height, options = 
 
         } else if (output && !diffMask) {
             // pixels are similar; draw background as grayscale image blended with white
-            drawGrayPixel(img1, pos, alpha, output);
+            drawGrayPixel(output, pos, img1, alpha);
         }
     }
 
-    // return the number of different pixels
-    if (!mask) return diff;
+    // return the number of different pixels (no windowed post-pass needed if there are none)
+    if (!mask || !diff) return diff;
 
-    // windowed mode: return the maximum number of diff pixels (state 1) over all N×N
-    // sliding windows, N floored and clamped to [1, min(width, height)] before the integer
-    // conversion, so huge values saturate instead of wrapping
-    const n = Math.min(Math.max(Math.floor(windowSize) || 1, 1), width, height);
+    // windowed mode: return the maximum number of diff pixels (state 1) over all N×N sliding
+    // windows, N floored and clamped to [1, min(width, height)]
+    const n = Math.min(Math.max(Math.floor(windowSize), 1), width, height);
 
-    // colSum[x] counts diff pixels in column x over the last n rows; maintained
-    // incrementally (add entering row, subtract leaving row), which is why the
-    // full mask has to be kept around. diff pixels are odd (`& 1`), AA/same even.
-    if (firstDiffY < 0) return 0; // all diffs were excluded as AA
-
+    // colSum[x] counts diff pixels in column x over the last n rows; maintained incrementally (add
+    // entering row, subtract leaving row), which is why the full mask has to be kept around. diff
+    // pixels are odd (`& 1`), AA/same even.
     const colSum = new Uint16Array(width);
     let maxCount = 0;
     // running total of all column sums = diff pixels in the current n-row band;
@@ -372,21 +374,20 @@ const TOE_K3 = (1 + TOE_K1) / (1 + TOE_K2);
  *
  * @param {Uint8Array | Uint8ClampedArray} img1
  * @param {Uint8Array | Uint8ClampedArray} img2
- * @param {number} k
- * @param {number} m
+ * @param {number} k pixel offset (same in both images)
  * @param {boolean} checkerboard
  * @param {number} maxDelta maximum acceptable HyAB distance
  * @return {number} 0 if below the threshold, otherwise ±1 (negative if the img2 pixel is darker)
  */
-function colorDelta(img1, img2, k, m, checkerboard, maxDelta) {
+function colorDelta(img1, img2, k, checkerboard, maxDelta) {
     const r1 = img1[k];
     const g1 = img1[k + 1];
     const b1 = img1[k + 2];
     const a1 = img1[k + 3];
-    const r2 = img2[m];
-    const g2 = img2[m + 1];
-    const b2 = img2[m + 2];
-    const a2 = img2[m + 3];
+    const r2 = img2[k];
+    const g2 = img2[k + 1];
+    const b2 = img2[k + 2];
+    const a2 = img2[k + 3];
 
     if (a1 === 255 && a2 === 255) { // fast path for opaque colors
         return colorDeltaOpaque(r1, g1, b1, r2, g2, b2, maxDelta);
@@ -419,7 +420,7 @@ function colorDeltaOpaque(r1, g1, b1, r2, g2, b2, maxDelta) {
         l1 = cbrtLUT(L_R[r1] + L_G[g1] + L_B[b1]);
         m1 = cbrtLUT(M_R[r1] + M_G[g1] + M_B[b1]);
         s1 = cbrtLUT(S_R[r1] + S_G[g1] + S_B[b1]);
-        lr1 = toe(0.2104542553 * l1 + 0.7936177850 * m1 - 0.0040720468 * s1);
+        lr1 = lightness(l1, m1, s1);
         OKLAB_CACHE_KEYS[slot1] = stored1;
         OKLAB_CACHE_VALUES[offset1] = l1;
         OKLAB_CACHE_VALUES[offset1 + 1] = m1;
@@ -441,7 +442,7 @@ function colorDeltaOpaque(r1, g1, b1, r2, g2, b2, maxDelta) {
         l2 = cbrtLUT(L_R[r2] + L_G[g2] + L_B[b2]);
         m2 = cbrtLUT(M_R[r2] + M_G[g2] + M_B[b2]);
         s2 = cbrtLUT(S_R[r2] + S_G[g2] + S_B[b2]);
-        lr2 = toe(0.2104542553 * l2 + 0.7936177850 * m2 - 0.0040720468 * s2);
+        lr2 = lightness(l2, m2, s2);
         OKLAB_CACHE_KEYS[slot2] = stored2;
         OKLAB_CACHE_VALUES[offset2] = l2;
         OKLAB_CACHE_VALUES[offset2 + 1] = m2;
@@ -469,9 +470,13 @@ function colorDeltaTransparent(r1, g1, b1, a1, r2, g2, b2, a2, k, checkerboard, 
     // blend pixels with background
     let rb = 255, gb = 255, bb = 255;
     if (checkerboard) {
-        rb = 48 + 159 * (k % 2);
-        gb = 48 + 159 * ((k / 1.618033988749895 | 0) % 2);
-        bb = 48 + 159 * ((k / 2.618033988749895 | 0) % 2);
+        // pick one of 8 dark/light background colors per pixel from the top 3 bits of a Fibonacci
+        // hash of its index (uniform and independent per channel), so that no pair of colors that
+        // only differ in alpha can look alike over more than 1/8 of the pixels
+        const h = Math.imul(k >> 2, 0x9e3779b1);
+        rb = 48 + 159 * (h >>> 31);
+        gb = 48 + 159 * ((h >>> 30) & 1);
+        bb = 48 + 159 * ((h >>> 29) & 1);
     }
     // blended channel values are fractional, so interpolate the sRGB->linear LUT
     r1 = (r1 * a1 + rb * (255 - a1)) / 255;
@@ -489,8 +494,8 @@ function colorDeltaTransparent(r1, g1, b1, a1, r2, g2, b2, a2, k, checkerboard, 
     const l2 = cbrtLUT(0.4122214708 * lr2 + 0.5363325363 * lg2 + 0.0514459929 * lb2);
     const m2 = cbrtLUT(0.2119034982 * lr2 + 0.6806995451 * lg2 + 0.1073969566 * lb2);
     const s2 = cbrtLUT(0.0883024619 * lr2 + 0.2817188376 * lg2 + 0.6299787005 * lb2);
-    const Lr1 = toe(0.2104542553 * l1 + 0.7936177850 * m1 - 0.0040720468 * s1);
-    const Lr2 = toe(0.2104542553 * l2 + 0.7936177850 * m2 - 0.0040720468 * s2);
+    const Lr1 = lightness(l1, m1, s1);
+    const Lr2 = lightness(l2, m2, s2);
 
     return oklabHyabDelta(Lr1 - Lr2, l1 - l2, m1 - m2, s1 - s2, maxDelta);
 }
@@ -517,9 +522,13 @@ function oklabHyabDelta(dLr, dl, dm, ds, maxDelta) {
 }
 
 /**
- * @param {number} L
+ * Toe-corrected OKLab lightness (Lr) from cube-rooted LMS values.
+ * @param {number} l
+ * @param {number} m
+ * @param {number} s
  */
-function toe(L) {
+function lightness(l, m, s) {
+    const L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
     const x = TOE_K3 * L - TOE_K1;
     return 0.5 * (x + Math.sqrt(x * x + 4 * TOE_K2 * TOE_K3 * L));
 }
@@ -585,12 +594,12 @@ function drawPixel(output, pos, r, g, b) {
 }
 
 /**
- * @param {Uint8Array | Uint8ClampedArray} img
- * @param {number} i
- * @param {number} alpha
  * @param {Uint8Array | Uint8ClampedArray} output
+ * @param {number} i
+ * @param {Uint8Array | Uint8ClampedArray} img
+ * @param {number} alpha
  */
-function drawGrayPixel(img, i, alpha, output) {
+function drawGrayPixel(output, i, img, alpha) {
     const val = 255 + (img[i] * 0.29889531 + img[i + 1] * 0.58662247 + img[i + 2] * 0.11448223 - 255) * alpha * img[i + 3] / 255;
     drawPixel(output, i, val, val, val);
 }
